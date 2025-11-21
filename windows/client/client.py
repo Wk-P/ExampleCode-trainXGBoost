@@ -227,11 +227,10 @@ async def main():
     client = DataClient(url)
     folder = datetime.now().strftime("%Y_%m_%d %H_%M_%S")
 
-    await hdd_tasks(client, folder=folder, task_count=2000)
-
-    await mem_tasks(client, folder=folder, task_count=2000)
-    
-    await cpu_tasks(client, folder=folder, task_count=2000)
+    for i in range(10):
+        await hdd_tasks(client, folder=f"{folder}_hdd_{i}", task_count=20)
+        await mem_tasks(client, folder=f"{folder}_mem_{i}", task_count=20)
+        await cpu_tasks(client, folder=f"{folder}_cpu_{i}", task_count=20)
 
     # close client session
     await client.close()

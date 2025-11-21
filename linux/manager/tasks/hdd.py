@@ -6,7 +6,7 @@ async def hdd_task(headers: dict, data: dict, manager: ServerManager, round_robi
     # if resource is enough, forward the request to worker node
     # else return error response
     
-    if manager.check_worker_resources(round_robin_index,"HDD") is False:
+    if manager.check_worker_resources(round_robin_index, "HDD") is False:
         raise Exception("worker node HDD resource not enough")
     
     try:

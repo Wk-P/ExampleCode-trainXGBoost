@@ -1,14 +1,12 @@
-import trace
 from typing import TypedDict, Any
 import asyncio
 import traceback
 import concurrent.futures
-from webbrowser import get
-from xml.etree.ElementInclude import include
 import paramiko             # type: ignore
 from aiohttp import ClientTimeout
 import aiohttp
 from docker_utils.utils import get_stack_services, get_stack_services_resources_limits, get_docker_node_list, get_service_port_list
+from pathlib import Path
 
 class ManagerResponse(TypedDict):
     task_index: str
@@ -131,7 +129,7 @@ class ServerManager:
         # get worker resource limits
         # return (cpus_limit_cores, memory_limit_mb)
         if kwargs.get("stack_name") is None:
-            with open('stack_name', 'r', encoding='utf-8') as f:
+            with open(Path(__file__).parent / 'stack_name', 'r', encoding='utf-8') as f:
                 self.stack_name = f.read().strip()
         else:
             self.stack_name = kwargs.get("stack_name")
@@ -158,13 +156,64 @@ class ServerManager:
         print(f"Get Services Ports...")
         print(f"Services Ports: {self.post_list}")
 
-        self.worker_urls = [
-            {
-                "url": f"http://{node['addr']}:{port[0]['PublishedPort']}",
-                "service_name": port[0]['ServiceName']
-            } for node, port in zip(self.node_list, self.post_list)
-        ]
-        
+        # Build a unified workers list from discovered resource limits and ports.
+        # Each entry contains node/service info and the request URL to use.
+        self.workers = []
+
+        # map service_name -> published port (first seen)
+        port_map: dict[str, int] = {}
+        for ports in self.post_list:
+            if ports and isinstance(ports, list) and ports[0].get('ServiceName'):
+                svc = ports[0].get('ServiceName')
+                port_map.setdefault(svc, ports[0].get('PublishedPort'))
+
+        # prefer using worker_resources_limits_list as authoritative mapping of service -> node
+        for limits_info in self.worker_resources_limits_list:
+            svc_name = limits_info.get('service_name')
+            for limit in limits_info.get('limits', []):
+                node_ip = limit.get('node_host_ip', '')
+                pub_port = port_map.get(svc_name)
+                if pub_port:
+                    url = f"http://{node_ip}:{pub_port}"
+                else:
+                    # if no published port known, fallback to bare node ip
+                    url = f"http://{node_ip}"
+
+                self.workers.append({
+                    'service_name': svc_name,
+                    'node_id': limit.get('node_id'),
+                    'node_hostname': limit.get('node_hostname'),
+                    'node_host_ip': node_ip,
+                    'published_port': pub_port,
+                    'url': url,
+                    'cpus_limit_cores': limit.get('cpus_limit_cores'),
+                    'memory_limit_mb': limit.get('memory_limit_mb'),
+                    'hdd_limit_mb': limit.get('hdd_limit_mb'),
+                })
+
+        # If no workers discovered from limits, fallback to zipping node_list and post_list
+        if not self.workers:
+            for node, port in zip(self.node_list, self.post_list):
+                if not port:
+                    continue
+                svc = port[0].get('ServiceName')
+                pub = port[0].get('PublishedPort')
+                node_addr = node.get('addr')
+                self.workers.append({
+                    'service_name': svc,
+                    'node_id': node.get('id'),
+                    'node_hostname': node.get('hostname'),
+                    'node_host_ip': node_addr,
+                    'published_port': pub,
+                    'url': f"http://{node_addr}:{pub}",
+                    'cpus_limit_cores': 0,
+                    'memory_limit_mb': 0,
+                    'hdd_limit_mb': None,
+                })
+
+        # Build backward-compatible structures used elsewhere
+        self.worker_urls = [{ 'url': w['url'], 'service_name': w['service_name'] } for w in self.workers]
+
         print(f"Initialized ServerManager with {len(self.worker_urls)} worker nodes.")
         print(f"Worker URLs: {self.worker_urls}")
 
@@ -190,31 +239,50 @@ class ServerManager:
         self.round_robin_index_lock = asyncio.Lock()
         
 
-        self.worker_ssh_clients: list[WorkerSSHClient] = [
-            WorkerSSHClient(
-                url, 
-                ssh_client=paramiko.SSHClient(),
-                hostname=self.find_hostip_by_servicename(url['service_name']),
-                port=22,
-                username="pi", 
-                password="raspberrypi"
-            ) for url in self.worker_urls
-        ]
+        # create WorkerSSHClient instances based on unified workers list
+        self.worker_ssh_clients: list[WorkerSSHClient] = []
+        for w in self.workers:
+            hostname = w.get('node_host_ip') or self.find_hostip_by_servicename(w.get('service_name'))
+            try:
+                self.worker_ssh_clients.append(
+                    WorkerSSHClient(
+                        w.get('url'),
+                        ssh_client=paramiko.SSHClient(),
+                        hostname=hostname,
+                        port=22,
+                        username="pi",
+                        password="raspberrypi"
+                    )
+                )
+            except Exception as exc:
+                print(f"Failed to create WorkerSSHClient for {w.get('service_name')}@{hostname}: {exc}")
 
     def find_hostip_by_servicename(self, service_name: str) -> str:
+        # First try unified workers list
+        if hasattr(self, 'workers'):
+            for w in self.workers:
+                if w.get('service_name') == service_name:
+                    ip = w.get('node_host_ip')
+                    if ip:
+                        print(f"[find_hostip_by_servicename] Found host IP from workers: {ip} for service: {service_name}")
+                        return ip
+
+        # Fallback to original resource limits list
         for limits in self.worker_resources_limits_list:
             if limits['service_name'] == service_name:
-                # by limits list find node and service
-                limits = limits['limits']
-                
-                print(f"[find_hostip_by_servicename] Found host IP: {limits[0]['node_host_ip']} for service: {service_name}")
-                return limits[0]['node_host_ip']
+                limits_inner = limits.get('limits', [])
+                if limits_inner:
+                    print(f"[find_hostip_by_servicename] Found host IP from limits: {limits_inner[0].get('node_host_ip')} for service: {service_name}")
+                    return limits_inner[0].get('node_host_ip')
 
-        return self.node_list[0]['addr']    # default to first node addr if not found
+        # Final fallback to first node address
+        if self.node_list:
+            return self.node_list[0].get('addr', '')
+        return ''
 
     async def get_and_update_round_robin_index(self) -> int:
-        index = self.round_robin_index
         async with self.round_robin_index_lock:
+            index = self.round_robin_index
             self.round_robin_index = (self.round_robin_index + 1) % len(self.worker_urls)
         return index
     
@@ -234,3 +302,10 @@ class ServerManager:
         # Define threshold for resource usage (e.g., 80%)
         threshold = 0.8
         return usage_ratio < threshold
+    
+if __name__ == "__main__":
+    # test code
+    manager = ServerManager()
+    for i in range(len(manager.worker_ssh_clients)):
+        client = manager.worker_ssh_clients[i]
+        print(f"Worker {i}: {client.hostname}, Mem Usage: {client.mem_usage}/{client.max_mem_usage}, HDD Usage: {client.hdd_usage}/{client.max_hdd_usage}")

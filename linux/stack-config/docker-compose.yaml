@@ -32,7 +32,7 @@ services:
           - node.labels.type == middle
       resources:
         limits:
-          cpus: '0.8'
+          cpus: '0.6'
           memory: 512M
     ports:
       - target: 8080
@@ -53,7 +53,7 @@ services:
           - node.labels.type == high
       resources:
         limits:
-          cpus: '1.0'
+          cpus: '0.8'
           memory: 512M
     ports:
       - target: 8080
