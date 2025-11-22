@@ -1,6 +1,5 @@
 from typing import Any
 
-from matplotlib.pylab import f
 from manager_objects import ServerManager, ManagerResponse
 from tasks.task import task_request
 

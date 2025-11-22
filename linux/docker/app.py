@@ -2,12 +2,12 @@ from aiohttp import web
 from functools import wraps
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from time import perf_counter
+from time import thread_time
 from pathlib import Path
 import shutil
-from asyncio import Lock
+import threading
 
-thread_executor = ThreadPoolExecutor(max_workers=4)
+thread_executor = ThreadPoolExecutor(max_workers=1)
 
 def timer(func):
     """Decorator that supports both sync and async functions.
@@ -18,22 +18,11 @@ def timer(func):
     """
     @wraps(func)
     def _sync_wrapper(*args, **kwargs):
-        start_time = perf_counter()
+        start_time = thread_time()
         result = func(*args, **kwargs)
-        end_time = perf_counter()
+        end_time = thread_time()
         elapsed_time = end_time - start_time
         return result, elapsed_time
-
-    @wraps(func)
-    async def _async_wrapper(*args, **kwargs):
-        start_time = perf_counter()
-        result = await func(*args, **kwargs)
-        end_time = perf_counter()
-        elapsed_time = end_time - start_time
-        return result, elapsed_time
-
-    if asyncio.iscoroutinefunction(func):
-        return _async_wrapper
     return _sync_wrapper
 
 @timer
@@ -73,12 +62,13 @@ def mem_task(size_mb: int) -> tuple[int, float]:
 
     return size_mb
 
-
+# to avoid concurrent writes to HDD
+HDD_LOCK = threading.Lock()
 @timer
-async def hdd_write_load(path, size_mb=1000) -> tuple[int, float]:
+def hdd_task(path, size_mb=1000) -> tuple[int, float]:
     _path = Path(path)
-    chunk = b"\0" * (1024 * 1024) # 1MB, 全部零字节，CPU 不参与计算
-    async with HDD_LOCK:
+    chunk = b"\0" * (1024 * 1024) # 1MB, all zeros, to avoid actual disk write overhead
+    with HDD_LOCK:
         print(f"[HDD] Writing {size_mb} MB to {path} ...")
         with open(path, "wb", buffering=0) as f:
             for _ in range(size_mb):
@@ -157,12 +147,14 @@ async def handle_request_hdd(request: web.Request) -> web.Response:
     # record hdd_free
     hdd_free_before = shutil.disk_usage(Path(path).parent.as_posix()).free // (1024 * 1024)
     
+    # get loop from asyncio
+    loop = asyncio.get_event_loop()
+
     # calculate the processed time in thread pool
-    written_size, computation_time = await hdd_write_load(path, size_mb)
+    written_size, computation_time = await loop.run_in_executor(thread_executor, hdd_task, path, size_mb)
     processing_time = computation_time
     return web.json_response({"result": written_size, "task_index": task_index, "processing_time": processing_time, "hdd_free_before": hdd_free_before})
 
-HDD_LOCK = Lock()
 
 def init_app():
     app = web.Application()

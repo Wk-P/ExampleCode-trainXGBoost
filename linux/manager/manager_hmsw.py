@@ -84,6 +84,7 @@ async def handle_request(request: Request) -> Response:
             error=1,
             message=str(e),
             success=False,
+            response_data=None,
         ), status=500)
 
 
