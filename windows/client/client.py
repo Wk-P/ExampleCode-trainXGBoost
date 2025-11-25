@@ -97,32 +97,56 @@ def save_results_to_file(data_list: list[Dict[str, Any]], results: Dict[str, Any
 
     filepath = parent_path / filename
 
-    with open(filepath, "w") as f:
-        # prepare results
-        output = dict()
+    # prepare results
+    output = dict()
 
-        # for key, value in results.items():
-            # print(f"[save_results_to_file] result from results: {key}: {value}")
+    exclude_key_names = {"success", "error", "message", "task_index", "result", "task_class"}
 
-        exclude_key_names = {"success", "error", "message", "task_index", "result"}
+    for req in data_list:
+        task_index = req.get("task_index")
+        matching_result: dict = results.get(task_index)
+        if matching_result:
+            # judge task_class to get task_data
+            # task data for all k, v but whatever it is
+            tasks_data = { k: v for k, v in matching_result.items() if k not in exclude_key_names }
+            print(f"tasks_data: {tasks_data}")
+            print(f"[save_results_to_file] tasks_data: {tasks_data}")
+            # add to output
+            for k, v in tasks_data.items():
+                if output.get(k):
+                    output[k].append(v)
+                else:
+                    output[k] = [v]
 
-        for req in data_list:
-            task_index = req.get("task_index")
-            matching_result: dict = results.get(task_index)
-            if matching_result:
-                # judge task_class to get task_data
-                # task data for all k, v but whatever it is
-                tasks_data = { k: v for k, v in matching_result.items() if k not in exclude_key_names }
-                print(f"tasks_data: {tasks_data}")
-                print(f"[save_results_to_file] tasks_data: {tasks_data}")
-                # add to output
-                for k, v in tasks_data.items():
-                    if output.get(k):
-                        output[k].append(v)
-                    else:
-                        output[k] = [v]
+    # If file exists, try to merge by extending lists for matching keys
+    final = output
+    if filepath.exists():
+        try:
+            with open(filepath, 'r', encoding='utf-8') as rf:
+                existing = json.load(rf)
+            if isinstance(existing, dict):
+                for k, v in output.items():
+                    if isinstance(v, list):
+                        if k in existing and isinstance(existing[k], list):
+                            existing[k].extend(v)
+                        else:
+                            existing[k] = v
+                final = existing
+        except Exception as e:
+            # If reading fails, overwrite with current output (but report)
+            print(f"[save_results_to_file] Failed to read existing file, will overwrite: {e}")
+            final = output
 
-        json.dump(output, f, indent=4)
+    # Atomic write: write to temp file then replace
+    tmp = filepath.with_suffix(filepath.suffix + '.tmp')
+    with open(tmp, 'w', encoding='utf-8') as wf:
+        json.dump(final, wf, indent=4)
+    try:
+        tmp.replace(filepath)
+    except Exception:
+        # fallback to non-atomic replace
+        with open(filepath, 'w', encoding='utf-8') as wf:
+            json.dump(final, wf, indent=4)
 
     print(f"Saved results to {filepath}")
     return filepath
@@ -254,14 +278,14 @@ async def main():
     # create client instance
     url = "http://192.168.0.100:8080/"
     client = DataClient(url)
-    folder = datetime.now().strftime("%Y_%m_%d %H_%M_%S")
+    folder = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
 
     task_count = 200
-    loop_count = 30
+    loop_count = 100
 
-    await hdd_tasks(client, folder_arg={"folder": folder}, task_count=task_count, loop=loop_count)
+    # await hdd_tasks(client, folder_arg={"folder": folder}, task_count=task_count, loop=loop_count)
     await mem_tasks(client, folder_arg={"folder": folder}, task_count=task_count, loop=loop_count)
-    await cpu_tasks(client, folder_arg={"folder": folder}, task_count=task_count, loop=loop_count)
+    # await cpu_tasks(client, folder_arg={"folder": folder}, task_count=task_count, loop=loop_count)
 
     # close client session
     await client.close()
